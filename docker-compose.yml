@@ -1,0 +1,72 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://lnurl:lnurl@postgres/lnurl_hydra_login
+      REDIS_URL: redis://redis:6379
+      HYDRA_ADMIN_URL: http://hydra:4445
+      # Set to your public HTTPS URL in production
+      LNURL_CALLBACK_URL: https://your-domain.example.com/lnurl/callback
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      hydra-migrate:
+        condition: service_completed_successfully
+
+  hydra:
+    image: oryd/hydra:v2.2.0
+    command: serve all --dev
+    ports:
+      - "4444:4444"  # public API
+      - "4445:4445"  # admin API
+    environment:
+      DSN: postgres://hydra:hydra@postgres/hydra
+      URLS_SELF_ISSUER: http://localhost:4444/
+      URLS_SELF_PUBLIC: http://localhost:4444/
+      URLS_LOGIN: http://app:3000/login
+      URLS_CONSENT: http://app:3000/consent
+      SECRETS_SYSTEM: change-me-to-a-long-random-secret
+      OIDC_SUBJECT_IDENTIFIERS_SUPPORTED_TYPES: public
+      LOG_LEVEL: info
+    depends_on:
+      hydra-migrate:
+        condition: service_completed_successfully
+
+  hydra-migrate:
+    image: oryd/hydra:v2.2.0
+    command: migrate sql --yes
+    environment:
+      DSN: postgres://hydra:hydra@postgres/hydra
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hydra
+      POSTGRES_PASSWORD: hydra
+      POSTGRES_DB: hydra
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hydra"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:
