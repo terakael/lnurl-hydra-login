@@ -1,0 +1,22 @@
+# Run once before deploying Hydra: kubectl apply -f k8s/hydra/migration-job.yaml
+# Wait for completion:          kubectl wait --for=condition=complete job/hydra-migrate -n auth --timeout=120s
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hydra-migrate
+  namespace: auth
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: hydra-migrate
+          image: oryd/hydra:v2.2.0
+          command: ["hydra", "migrate", "sql", "--yes"]
+          env:
+            - name: DSN
+              valueFrom:
+                secretKeyRef:
+                  name: auth-secrets
+                  key: hydra-dsn
+  backoffLimit: 4

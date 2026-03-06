@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: login-app-config
+  namespace: auth
+data:
+  # Internal cluster URL for Hydra's admin API - never exposed externally
+  HYDRA_ADMIN_URL: "http://hydra.auth.svc.cluster.local:4445"
+  AUTH_CHALLENGE_EXPIRY_SECONDS: "300"
+  LOG_LEVEL: "INFO"
+  PORT: "3000"

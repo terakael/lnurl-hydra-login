@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: hydra
+  namespace: auth
+spec:
+  selector:
+    app: hydra
+  ports:
+    - name: public
+      port: 4444
+      targetPort: 4444
+    - name: admin
+      port: 4445
+      targetPort: 4445
+  # ClusterIP - admin port (4445) is never exposed externally.
+  # Only public port (4444) is routed through Cloudflare Tunnel.
+  type: ClusterIP

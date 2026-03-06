@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - secrets.yaml
+  - hydra/configmap.yaml
+  - hydra/service.yaml
+  - hydra/deployment.yaml
+  - login-app/configmap.yaml
+  - login-app/service.yaml
+  - login-app/deployment.yaml
+  - cloudflared/configmap.yaml
+  - cloudflared/deployment.yaml
+  # hydra/migration-job.yaml is intentionally excluded here.
+  # Run it manually before first deploy - see deployment notes below.

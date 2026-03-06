@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hydra-config
+  namespace: auth
+data:
+  # Public-facing URLs (behind Cloudflare Tunnel)
+  URLS_SELF_ISSUER: "https://hydra.example.com/"
+  URLS_SELF_PUBLIC: "https://hydra.example.com/"
+  # Login/consent app URLs - internal cluster routing
+  URLS_LOGIN: "https://auth.example.com/login"
+  URLS_CONSENT: "https://auth.example.com/consent"
+
+  OIDC_SUBJECT_IDENTIFIERS_SUPPORTED_TYPES: "public"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+
+  # Token lifetimes
+  TTL_ACCESS_TOKEN: "1h"
+  TTL_REFRESH_TOKEN: "720h"
+  TTL_ID_TOKEN: "1h"
+  TTL_LOGIN_CONSENT_REQUEST: "10m"

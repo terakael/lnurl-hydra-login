@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hydra
+  namespace: auth
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hydra
+  template:
+    metadata:
+      labels:
+        app: hydra
+    spec:
+      containers:
+        - name: hydra
+          image: oryd/hydra:v2.2.0
+          command: ["hydra", "serve", "all"]
+          ports:
+            - name: public
+              containerPort: 4444
+            - name: admin
+              containerPort: 4445
+          env:
+            - name: DSN
+              valueFrom:
+                secretKeyRef:
+                  name: auth-secrets
+                  key: hydra-dsn
+            - name: SECRETS_SYSTEM
+              valueFrom:
+                secretKeyRef:
+                  name: auth-secrets
+                  key: hydra-system-secret
+            - name: SECRETS_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: auth-secrets
+                  key: hydra-cookie-secret
+          envFrom:
+            - configMapRef:
+                name: hydra-config
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 4444
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health/alive
+              port: 4444
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
