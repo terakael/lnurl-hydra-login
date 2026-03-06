@@ -68,6 +68,12 @@ class HydraClient:
                 "session": {
                     "id_token": {
                         "lightning_pubkey": subject,
+                        # Cloudflare Access requires email + profile scopes but we
+                        # have no user email. Use the pubkey as a stable unique
+                        # identifier in email form so CF can identify the user.
+                        "email": f"{subject}@lightning",
+                        "email_verified": True,
+                        "name": subject[:16],
                     }
                 },
             },
