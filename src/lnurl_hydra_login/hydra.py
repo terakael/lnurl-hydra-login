@@ -28,7 +28,7 @@ class HydraClient:
             json={
                 "subject": subject,
                 "remember": True,
-                "remember_for": 86400,
+                "remember_for": 0,
                 "amr": ["lnurl"],
             },
         )
@@ -64,7 +64,7 @@ class HydraClient:
             json={
                 "grant_scope": grant_scope,
                 "remember": True,
-                "remember_for": 86400,
+                "remember_for": 0,
                 "session": {
                     "id_token": {
                         "lightning_pubkey": subject,
