@@ -13,6 +13,16 @@ spec:
       labels:
         app: hydra
     spec:
+      initContainers:
+        - name: hydra-migrate
+          image: oryd/hydra:v2.2.0
+          command: ["sh", "-c", "hydra migrate sql --yes $DSN"]
+          env:
+            - name: DSN
+              valueFrom:
+                secretKeyRef:
+                  name: auth-secrets
+                  key: hydra-dsn
       containers:
         - name: hydra
           image: oryd/hydra:v2.2.0

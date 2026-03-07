@@ -1,9 +1,5 @@
-# Tunnel ingress rules.
-# Assumes two DNS records in Cloudflare dashboard pointing to this tunnel:
-#   hydra.example.com  →  <tunnel-id>.cfargotunnel.com
-#   auth.example.com   →  <tunnel-id>.cfargotunnel.com
-#
-# Replace example.com with your actual domain.
+# Replace CHANGEME-tunnel-id with the TunnelID from your credentials JSON.
+# Replace example.com with your actual domain throughout.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -15,12 +11,11 @@ data:
     credentials-file: /etc/cloudflared/tunnel-credentials.json
 
     ingress:
-      # Hydra public OAuth2/OIDC endpoints
-      # Cloudflare Access will use https://hydra.example.com as the OIDC provider URL
+      # Hydra OIDC endpoints - Cloudflare Access uses this as the provider URL
       - hostname: hydra.example.com
         service: http://hydra.auth.svc.cluster.local:4444
 
-      # Login app - login page, consent, and LNURL wallet callback
+      # Login app - login page, consent page, LNURL wallet callback
       - hostname: auth.example.com
         service: http://lnurl-login.auth.svc.cluster.local:3000
 

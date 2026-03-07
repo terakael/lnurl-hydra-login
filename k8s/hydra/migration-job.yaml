@@ -12,7 +12,7 @@ spec:
       containers:
         - name: hydra-migrate
           image: oryd/hydra:v2.2.0
-          command: ["hydra", "migrate", "sql", "--yes"]
+          command: ["sh", "-c", "hydra migrate sql --yes $DSN"]
           env:
             - name: DSN
               valueFrom:
