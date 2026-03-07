@@ -207,7 +207,7 @@
 
     function show(id) {
       ["loading-section", "qr-section", "waiting", "success-section", "error-section"]
-        .forEach(s => document.getElementById(s).style.display = s === id ? "" : "none");
+        .forEach(s => document.getElementById(s).style.display = s === id ? "block" : "none");
     }
 
     async function init() {
@@ -234,7 +234,7 @@
         document.getElementById("qr-img").src = `/lnurl/qr/${encodeURIComponent(k1)}`;
         document.getElementById("lnurl-display").textContent = lnurl.toUpperCase();
         show("qr-section");
-        document.getElementById("waiting").style.display = "";
+        document.getElementById("waiting").style.display = "block";
       });
 
       eventSource.addEventListener("authenticated", (e) => {

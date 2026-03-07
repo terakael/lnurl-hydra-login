@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -169,13 +171,45 @@ def create_app(config: Config) -> Quart:
     async def stream_auth_status(k1: str):
         """SSE stream the browser subscribes to while showing the QR code."""
         async def event_stream():
+            # 2 KiB padding forces Cloudflare to flush its response buffer
+            # before the first real event arrives at the browser.
+            yield ": " + "x" * 2048 + "\n\n"
             yield _sse_event("connected", {"k1": k1})
-            async for redirect_to in sse.listen_for_auth(
-                k1, timeout=float(config.auth_challenge_expiry_seconds)
-            ):
-                yield _sse_event("authenticated", {"redirect_to": redirect_to})
-                return
-            yield _sse_event("expired", {"error": "Challenge expired"})
+
+            # Run the Redis listener in a background task so we can send
+            # periodic heartbeat comments to keep Cloudflare from RST-ing
+            # the HTTP/2 stream while the user is scanning the QR code.
+            queue: asyncio.Queue = asyncio.Queue()
+
+            async def _feed():
+                try:
+                    async for redirect_to in sse.listen_for_auth(
+                        k1, timeout=float(config.auth_challenge_expiry_seconds)
+                    ):
+                        await queue.put(("auth", redirect_to))
+                except Exception as exc:
+                    logger.error("SSE listener error for k1=%.16s...: %s", k1, exc)
+                finally:
+                    await queue.put(("done", None))
+
+            task = asyncio.create_task(_feed())
+            try:
+                while True:
+                    try:
+                        kind, value = await asyncio.wait_for(queue.get(), timeout=20)
+                    except asyncio.TimeoutError:
+                        yield ": heartbeat\n\n"
+                        continue
+                    if kind == "auth":
+                        yield _sse_event("authenticated", {"redirect_to": value})
+                        return
+                    else:
+                        yield _sse_event("expired", {"error": "Challenge expired"})
+                        return
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         return Response(
             event_stream(),
