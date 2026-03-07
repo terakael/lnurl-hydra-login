@@ -27,8 +27,7 @@ class HydraClient:
             params={"login_challenge": login_challenge},
             json={
                 "subject": subject,
-                "remember": True,
-                "remember_for": 0,
+                "remember": False,
                 "amr": ["lnurl"],
             },
         )
@@ -63,8 +62,7 @@ class HydraClient:
             params={"consent_challenge": consent_challenge},
             json={
                 "grant_scope": grant_scope,
-                "remember": True,
-                "remember_for": 0,
+                "remember": False,
                 "session": {
                     "id_token": {
                         "lightning_pubkey": subject,
