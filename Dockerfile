@@ -5,9 +5,9 @@ WORKDIR /app
 RUN pip install uv
 
 COPY pyproject.toml .
-RUN uv pip install --system .
-
 COPY src/ src/
+
+RUN uv pip install --system .
 
 ENV PORT=3000
 EXPOSE 3000
