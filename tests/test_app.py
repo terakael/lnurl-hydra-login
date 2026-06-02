@@ -10,6 +10,9 @@ async def _valid_signature(*_args, **_kwargs) -> bool:
     return True
 
 
+_LONG_HYDRA_CHALLENGE = "A" * 1140
+
+
 def _cookie_header(session_id: str, stream_token: str) -> dict[str, str]:
     return {"Cookie": f"st_{session_id}={stream_token}"}
 
@@ -32,6 +35,17 @@ async def test_login_rejects_invalid_login_challenge_format(app):
 
     assert response.status_code == 400
     assert await response.get_json() == {"error": "Invalid login_challenge"}
+
+
+@pytest.mark.asyncio
+async def test_login_accepts_long_hydra_challenge(app, fake_hydra):
+    fake_hydra.login_requests[_LONG_HYDRA_CHALLENGE] = {"skip": False}
+
+    async with app.test_app():
+        client = app.test_client()
+        response = await client.get(f"/login?login_challenge={_LONG_HYDRA_CHALLENGE}")
+
+    assert response.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -171,6 +185,20 @@ async def test_consent_rejects_invalid_challenge_format(app):
 
     assert response.status_code == 400
     assert await response.get_json() == {"error": "Invalid consent_challenge"}
+
+
+@pytest.mark.asyncio
+async def test_consent_accepts_long_hydra_challenge(app, fake_hydra):
+    fake_hydra.consent_requests[_LONG_HYDRA_CHALLENGE] = {
+        "requested_scope": ["openid"],
+        "subject": "pubkey-1",
+    }
+
+    async with app.test_app():
+        client = app.test_client()
+        response = await client.get(f"/consent?consent_challenge={_LONG_HYDRA_CHALLENGE}")
+
+    assert response.status_code == 302
 
 
 @pytest.mark.asyncio

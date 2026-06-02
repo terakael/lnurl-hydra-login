@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from lnurl_hydra_login.auth import (
@@ -136,6 +138,35 @@ async def test_claim_and_complete_round_trip_on_postgres(pg_db, clock, monkeypat
     assert stored["authenticated_at"] == clock.now
     assert stored["claim_token"] is None
     assert stored["claim_expires_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_claim_challenge_allows_only_one_concurrent_claimer_on_postgres(pg_db, clock, monkeypatch):
+    k1 = "0" * 64
+    await _insert_challenge(pg_db, k1=k1, expires_at=clock.now + 60)
+
+    async def slow_valid_signature(*_args, **_kwargs) -> bool:
+        await asyncio.sleep(0.05)
+        return True
+
+    monkeypatch.setattr("lnurl_hydra_login.auth.verify_lnurl_signature", slow_valid_signature)
+
+    first, second = await asyncio.gather(
+        claim_challenge(pg_db, k1, "sig", "pubkey-1"),
+        claim_challenge(pg_db, k1, "sig", "pubkey-1"),
+    )
+
+    successful = [row for row in (first, second) if row is not None]
+    assert len(successful) == 1
+    assert sum(row is None for row in (first, second)) == 1
+
+    stored = await pg_db.fetchrow(
+        "SELECT used, claim_token, claim_expires_at FROM auth_challenges WHERE k1 = $1",
+        k1,
+    )
+    assert stored["used"] == 1
+    assert stored["claim_token"] == successful[0]["claim_token"]
+    assert stored["claim_expires_at"] == clock.now + 30
 
 
 @pytest.mark.asyncio

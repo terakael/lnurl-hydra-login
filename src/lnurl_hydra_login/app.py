@@ -33,10 +33,10 @@ def _sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-# Hydra challenge tokens are opaque strings. The only guarantees from Hydra's
-# source are that they're URL-safe and reasonably short. We accept a broad
-# safe-character set rather than assuming a specific encoding.
-_HYDRA_CHALLENGE_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,256}$")
+# Hydra challenge tokens are opaque strings. Hydra's current and legacy
+# encodings can exceed 1 KiB, so accept a broad URL-safe character set with a
+# generous cap rather than assuming a compact format.
+_HYDRA_CHALLENGE_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,4096}$")
 
 
 def _validate_redirect_to(redirect_to: str, hydra_public_url: str) -> bool:
