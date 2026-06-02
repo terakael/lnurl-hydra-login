@@ -204,6 +204,9 @@ def create_app(config: Config) -> Quart:
         # On failure we unclaim (claimed → pending) so the wallet can retry.
         # claim_token ensures a stale unclaim from a slow/crashed pod is
         # discarded if the lease was already recovered and re-claimed.
+        # Hydra's accept endpoint is idempotent: a second call for the same
+        # challenge returns 200 with a fresh redirect_to, so replica retries
+        # after a stale-claim recovery are safe.
         try:
             redirect_to = await hydra.accept_login(row["login_challenge"], subject=key)
         except Exception as e:
@@ -218,9 +221,15 @@ def create_app(config: Config) -> Quart:
 
         # Step 3 — complete (claimed → completed), persisting redirect_to.
         # From this point the result is durable; Redis is best-effort only.
+        # complete_challenge returns False when the claim_token no longer matches
+        # (lease expired mid-flight, another replica re-claimed the row). Return
+        # 500 so the wallet retries — Hydra's accept is idempotent so the retry
+        # is safe. The retry loop will either find the row already completed (if
+        # the other replica succeeded) or re-claim and complete it after that
+        # replica's lease expires.
         completed = await complete_challenge(db, k1, pubkey=key, redirect_to=redirect_to, claim_token=claim_token)
         if not completed:
-            logger.error("complete_challenge returned False for k1=%.16s... — unexpected state", k1)
+            logger.warning("complete_challenge missed claim for k1=%.16s... — lease expired mid-flight", k1)
             return jsonify({"status": "ERROR", "reason": "Internal error"}), 500
 
         # Step 4 — best-effort Redis publish for low-latency SSE delivery.
