@@ -6,6 +6,7 @@ metadata:
 data:
   # Internal cluster URL for Hydra's admin API - never exposed externally
   HYDRA_ADMIN_URL: "http://hydra.auth.svc.cluster.local:4445"
+  HYDRA_PUBLIC_URL: "https://hydra.intur.nl"
   AUTH_CHALLENGE_EXPIRY_SECONDS: "300"
   LOG_LEVEL: "INFO"
   PORT: "3000"

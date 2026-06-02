@@ -1,3 +1,5 @@
+import contextlib
+
 import asyncpg
 
 
@@ -25,6 +27,13 @@ class Database:
         async with self._pool.acquire() as conn:
             return await conn.fetchval(query, *args)
 
+    @contextlib.asynccontextmanager
+    async def transaction(self):
+        """Yield a connection with an open transaction; commits on exit, rolls back on error."""
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                yield conn
+
     async def migrate(self):
         await self.execute("""
             CREATE TABLE IF NOT EXISTS auth_challenges (
@@ -32,8 +41,13 @@ class Database:
                 login_challenge TEXT NOT NULL,
                 created_at BIGINT NOT NULL,
                 expires_at BIGINT NOT NULL,
-                used INTEGER DEFAULT 0 CHECK(used IN (0, 1))
+                used INTEGER DEFAULT 0 CHECK(used IN (0, 1)),
+                stream_token TEXT
             )
+        """)
+        # Add stream_token to existing deployments that predate this column
+        await self.execute("""
+            ALTER TABLE auth_challenges ADD COLUMN IF NOT EXISTS stream_token TEXT
         """)
         await self.execute("""
             CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at

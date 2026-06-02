@@ -7,8 +7,11 @@ services:
       DATABASE_URL: postgresql://lnurl:lnurl@postgres/lnurl_hydra_login
       REDIS_URL: redis://redis:6379
       HYDRA_ADMIN_URL: http://hydra:4445
+      HYDRA_PUBLIC_URL: http://localhost:4444
       # Set to your public HTTPS URL in production
       LNURL_CALLBACK_URL: https://your-domain.example.com/lnurl/callback
+      # Disable Secure cookie flag for local HTTP dev; must be true (default) in prod
+      SECURE_COOKIES: "false"
       LOG_LEVEL: INFO
     depends_on:
       postgres:

@@ -227,7 +227,8 @@
 
       lnurlText = lnurl;
 
-      // Open SSE before showing QR so we don't miss the callback
+      // The browser automatically sends the HttpOnly st_<k1> cookie set by
+      // /lnurl/generate, so the stream_token never appears in the URL.
       eventSource = new EventSource(`/lnurl/stream/${encodeURIComponent(k1)}`);
 
       eventSource.addEventListener("connected", () => {
@@ -240,6 +241,13 @@
       eventSource.addEventListener("authenticated", (e) => {
         const { redirect_to } = JSON.parse(e.data);
         eventSource.close();
+        // Validate redirect_to is a well-formed absolute URL before following it
+        let parsed;
+        try { parsed = new URL(redirect_to); } catch (_) { parsed = null; }
+        if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
+          showError("Received an invalid redirect. Please try again.");
+          return;
+        }
         show("success-section");
         window.location.href = redirect_to;
       });
