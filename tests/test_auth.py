@@ -8,11 +8,22 @@ from lnurl_hydra_login.auth import (
     complete_challenge,
     recover_stale_claims,
     unclaim_challenge,
+    verify_lnurl_signature,
 )
 
 
 async def _valid_signature(*_args, **_kwargs) -> bool:
     return True
+
+
+@pytest.mark.asyncio
+async def test_verify_lnurl_signature_returns_false_on_verifier_exception(monkeypatch):
+    def raise_error(**_kwargs):
+        raise ValueError("bad sig")
+
+    monkeypatch.setattr("lnurl_hydra_login.auth.lnurlauth_verify", raise_error)
+
+    assert await verify_lnurl_signature("k1", "sig", "pubkey") is False
 
 
 @pytest.mark.asyncio
@@ -43,6 +54,27 @@ async def test_claim_challenge_rejects_active_claim(fake_db, clock, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_claim_challenge_returns_none_for_missing_row(fake_db, monkeypatch):
+    monkeypatch.setattr("lnurl_hydra_login.auth.verify_lnurl_signature", _valid_signature)
+
+    row = await claim_challenge(fake_db, "missing" * 10 + "miss", "sig", "pubkey")
+
+    assert row is None
+
+
+@pytest.mark.asyncio
+async def test_claim_challenge_rejects_expired_row(fake_db, clock, monkeypatch):
+    k1 = "x" * 64
+    fake_db.seed_challenge(k1=k1, expires_at=clock.now - 1)
+    monkeypatch.setattr("lnurl_hydra_login.auth.verify_lnurl_signature", _valid_signature)
+
+    row = await claim_challenge(fake_db, k1, "sig", "pubkey")
+
+    assert row is None
+    assert fake_db.rows[k1]["used"] == 0
+
+
+@pytest.mark.asyncio
 async def test_claim_challenge_recovers_expired_claim(fake_db, clock, monkeypatch):
     k1 = "c" * 64
     fake_db.seed_challenge(k1=k1, used=1, claim_token="stale", claim_expires_at=clock.now - 1)
@@ -53,6 +85,35 @@ async def test_claim_challenge_recovers_expired_claim(fake_db, clock, monkeypatc
     assert row is not None
     assert fake_db.rows[k1]["used"] == 1
     assert fake_db.rows[k1]["claim_token"] != "stale"
+
+
+@pytest.mark.asyncio
+async def test_claim_challenge_rejects_completed_row(fake_db, clock, monkeypatch):
+    k1 = "y" * 64
+    fake_db.seed_challenge(k1=k1, used=2, expires_at=clock.now + 60)
+    monkeypatch.setattr("lnurl_hydra_login.auth.verify_lnurl_signature", _valid_signature)
+
+    row = await claim_challenge(fake_db, k1, "sig", "pubkey")
+
+    assert row is None
+    assert fake_db.rows[k1]["used"] == 2
+
+
+@pytest.mark.asyncio
+async def test_claim_challenge_rejects_bad_signature(fake_db, clock, monkeypatch):
+    k1 = "z" * 64
+    fake_db.seed_challenge(k1=k1, expires_at=clock.now + 60)
+
+    async def _invalid_signature(*_args, **_kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr("lnurl_hydra_login.auth.verify_lnurl_signature", _invalid_signature)
+
+    row = await claim_challenge(fake_db, k1, "sig", "pubkey")
+
+    assert row is None
+    assert fake_db.rows[k1]["used"] == 0
+    assert fake_db.rows[k1]["claim_token"] is None
 
 
 @pytest.mark.asyncio

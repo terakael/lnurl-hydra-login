@@ -18,6 +18,13 @@ def test_validate_redirect_to_rejects_mismatched_origin():
     ) is False
 
 
+def test_validate_redirect_to_rejects_relative_url():
+    assert _validate_redirect_to(
+        "/oauth2/auth?login_verifier=abc",
+        "https://hydra.example.com",
+    ) is False
+
+
 def test_validate_redirect_to_rejects_control_characters():
     assert _validate_redirect_to(
         "https://hydra.example.com/oauth2/auth\nhttps://evil.example.com",
