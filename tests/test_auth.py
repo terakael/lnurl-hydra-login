@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from ecdsa import SECP256k1, SigningKey
+from ecdsa.util import sigencode_der
 import pytest
 
 from lnurl_hydra_login.auth import (
     claim_challenge,
     cleanup_expired_challenges,
     complete_challenge,
+    generate_k1_challenge,
     recover_stale_claims,
     unclaim_challenge,
     verify_lnurl_signature,
@@ -17,6 +20,39 @@ async def _valid_signature(*_args, **_kwargs) -> bool:
 
 
 @pytest.mark.asyncio
+async def test_generate_k1_challenge_persists_row_and_returns_encoded_callback(fake_db, config, clock, monkeypatch):
+    monkeypatch.setattr("lnurl_hydra_login.auth.secrets.token_bytes", lambda _n: b"\x01" * 32)
+    token_values = iter(["stream-token-fixed", "session-id-fixed"])
+    monkeypatch.setattr("lnurl_hydra_login.auth.secrets.token_urlsafe", lambda _n: next(token_values))
+    monkeypatch.setattr("lnurl_hydra_login.auth.lnurl_encode", lambda url: f"encoded:{url}")
+
+    k1, lnurl_string, stream_token, session_id = await generate_k1_challenge(
+        fake_db,
+        "login-challenge-1",
+        config,
+    )
+
+    assert k1 == "01" * 32
+    assert stream_token == "stream-token-fixed"
+    assert session_id == "session-id-fixed"
+    assert lnurl_string == f"encoded:{config.lnurl_callback_url}?tag=login&k1={k1}"
+    assert fake_db.rows[k1] == {
+        "k1": k1,
+        "login_challenge": "login-challenge-1",
+        "created_at": clock.now,
+        "expires_at": clock.now + config.auth_challenge_expiry_seconds,
+        "used": 0,
+        "stream_token": "stream-token-fixed",
+        "session_id": "session-id-fixed",
+        "redirect_to": None,
+        "authenticated_at": None,
+        "pubkey": None,
+        "claim_token": None,
+        "claim_expires_at": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_verify_lnurl_signature_returns_false_on_verifier_exception(monkeypatch):
     def raise_error(**_kwargs):
         raise ValueError("bad sig")
@@ -24,6 +60,16 @@ async def test_verify_lnurl_signature_returns_false_on_verifier_exception(monkey
     monkeypatch.setattr("lnurl_hydra_login.auth.lnurlauth_verify", raise_error)
 
     assert await verify_lnurl_signature("k1", "sig", "pubkey") is False
+
+
+@pytest.mark.asyncio
+async def test_verify_lnurl_signature_returns_true_for_valid_signature():
+    signing_key = SigningKey.generate(curve=SECP256k1)
+    k1 = "11" * 32
+    sig = signing_key.sign_digest(bytes.fromhex(k1), sigencode=sigencode_der).hex()
+    key = signing_key.get_verifying_key().to_string().hex()
+
+    assert await verify_lnurl_signature(k1, sig, key) is True
 
 
 @pytest.mark.asyncio
@@ -85,6 +131,7 @@ async def test_claim_challenge_recovers_expired_claim(fake_db, clock, monkeypatc
     assert row is not None
     assert fake_db.rows[k1]["used"] == 1
     assert fake_db.rows[k1]["claim_token"] != "stale"
+    assert fake_db.rows[k1]["claim_expires_at"] == clock.now + 30
 
 
 @pytest.mark.asyncio
@@ -127,6 +174,7 @@ async def test_unclaim_challenge_is_fenced_by_claim_token(fake_db):
     await unclaim_challenge(fake_db, k1, "fresh")
     assert fake_db.rows[k1]["used"] == 0
     assert fake_db.rows[k1]["claim_token"] is None
+    assert fake_db.rows[k1]["claim_expires_at"] is None
 
 
 @pytest.mark.asyncio
@@ -144,6 +192,8 @@ async def test_complete_challenge_is_fenced_by_claim_token(fake_db, clock):
     assert fake_db.rows[k1]["pubkey"] == "pubkey"
     assert fake_db.rows[k1]["redirect_to"] == "https://hydra.example.com/done"
     assert fake_db.rows[k1]["authenticated_at"] == clock.now
+    assert fake_db.rows[k1]["claim_token"] is None
+    assert fake_db.rows[k1]["claim_expires_at"] is None
 
 
 @pytest.mark.asyncio

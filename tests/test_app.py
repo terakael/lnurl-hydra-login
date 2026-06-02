@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 import pytest
 
 
@@ -118,12 +119,22 @@ async def test_login_renders_qr_and_sets_stream_cookie(app, fake_db, fake_hydra)
     assert row["login_challenge"] == "fresh-challenge"
     assert row["used"] == 0
     assert row["session_id"] in body
-    assert "default-src 'none'" in response.headers["Content-Security-Policy"]
+    assert response.headers["Cache-Control"] == "no-store, private"
+    csp = response.headers["Content-Security-Policy"]
+    assert "default-src 'none'" in csp
 
     cookie = response.headers["Set-Cookie"]
     assert f"st_{row['session_id']}=" in cookie
     assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    assert "SameSite=Strict" in cookie
+    assert "Max-Age=300" in cookie
     assert "Path=/lnurl/stream" in cookie
+    nonce_header = re.search(r"script-src 'nonce-([^']+)'", csp)
+    nonce_body = re.search(r'<script nonce="([^"]+)">', body)
+    assert nonce_header is not None
+    assert nonce_body is not None
+    assert nonce_header.group(1) == nonce_body.group(1)
 
 
 @pytest.mark.asyncio
@@ -182,6 +193,24 @@ async def test_consent_accepts_allowed_scopes(app, fake_hydra):
 
 
 @pytest.mark.asyncio
+async def test_consent_accepts_empty_scope_list(app, fake_hydra):
+    fake_hydra.consent_requests["consent-empty"] = {
+        "requested_scope": [],
+        "subject": "pubkey-1",
+    }
+
+    async with app.test_app():
+        client = app.test_client()
+        response = await client.get("/consent?consent_challenge=consent-empty")
+
+    assert response.status_code == 302
+    challenge, scopes, subject = fake_hydra.accept_consent_calls[0]
+    assert challenge == "consent-empty"
+    assert scopes == []
+    assert subject == "pubkey-1"
+
+
+@pytest.mark.asyncio
 async def test_consent_returns_500_for_suspicious_redirect(app, fake_hydra):
     fake_hydra.consent_requests["consent-bad-redirect"] = {
         "requested_scope": ["openid"],
@@ -210,10 +239,36 @@ async def test_consent_returns_500_when_hydra_errors(app, fake_hydra):
 
 
 @pytest.mark.asyncio
+async def test_consent_returns_500_when_accept_fails(app, fake_hydra):
+    fake_hydra.consent_requests["consent-accept-fail"] = {
+        "requested_scope": ["openid"],
+        "subject": "pubkey-1",
+    }
+    fake_hydra.accept_consent_errors["consent-accept-fail"] = RuntimeError("boom")
+
+    async with app.test_app():
+        client = app.test_client()
+        response = await client.get("/consent?consent_challenge=consent-accept-fail")
+
+    assert response.status_code == 500
+    assert await response.get_json() == {"error": "Internal error"}
+
+
+@pytest.mark.asyncio
 async def test_lnurl_callback_rejects_invalid_parameters(app):
     async with app.test_app():
         client = app.test_client()
         response = await client.get("/lnurl/callback?tag=login&k1=abc")
+
+    assert response.status_code == 400
+    assert await response.get_json() == {"status": "ERROR", "reason": "Invalid parameters"}
+
+
+@pytest.mark.asyncio
+async def test_lnurl_callback_rejects_wrong_tag(app):
+    async with app.test_app():
+        client = app.test_client()
+        response = await client.get("/lnurl/callback?tag=withdraw&k1=abc&sig=sig&key=pubkey")
 
     assert response.status_code == 400
     assert await response.get_json() == {"status": "ERROR", "reason": "Invalid parameters"}

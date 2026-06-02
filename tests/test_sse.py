@@ -36,11 +36,14 @@ class FakeRedis:
         self.setex_calls: list[tuple[str, int, str]] = []
         self.publish_calls: list[tuple[str, str]] = []
         self.get_calls: list[str] = []
+        self.operations: list[tuple[str, str]] = []
 
     async def setex(self, key: str, ttl: int, payload: str) -> None:
+        self.operations.append(("setex", key))
         self.setex_calls.append((key, ttl, payload))
 
     async def publish(self, channel: str, payload: str) -> None:
+        self.operations.append(("publish", channel))
         self.publish_calls.append((channel, payload))
 
     async def get(self, key: str) -> str | None:
@@ -62,6 +65,10 @@ async def test_publish_auth_caches_and_publishes(monkeypatch):
     payload = json.dumps({"redirect_to": "https://hydra.example.com/done"})
     assert fake_redis.setex_calls == [("lnurl:result:k1-123", 60, payload)]
     assert fake_redis.publish_calls == [("lnurl:auth:k1-123", payload)]
+    assert fake_redis.operations == [
+        ("setex", "lnurl:result:k1-123"),
+        ("publish", "lnurl:auth:k1-123"),
+    ]
 
 
 @pytest.mark.asyncio

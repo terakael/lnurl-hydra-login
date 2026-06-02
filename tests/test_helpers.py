@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from lnurl_hydra_login.app import _validate_redirect_to
 from lnurl_hydra_login.config import Config
 
@@ -18,6 +20,13 @@ def test_validate_redirect_to_rejects_mismatched_origin():
     ) is False
 
 
+def test_validate_redirect_to_rejects_scheme_mismatch():
+    assert _validate_redirect_to(
+        "http://hydra.example.com/oauth2/auth",
+        "https://hydra.example.com",
+    ) is False
+
+
 def test_validate_redirect_to_rejects_relative_url():
     assert _validate_redirect_to(
         "/oauth2/auth?login_verifier=abc",
@@ -28,6 +37,14 @@ def test_validate_redirect_to_rejects_relative_url():
 def test_validate_redirect_to_rejects_control_characters():
     assert _validate_redirect_to(
         "https://hydra.example.com/oauth2/auth\nhttps://evil.example.com",
+        "https://hydra.example.com",
+    ) is False
+
+
+@pytest.mark.parametrize("bad_char", ["\r", "\x00"])
+def test_validate_redirect_to_rejects_other_control_characters(bad_char):
+    assert _validate_redirect_to(
+        f"https://hydra.example.com/oauth2/auth{bad_char}https://evil.example.com",
         "https://hydra.example.com",
     ) is False
 

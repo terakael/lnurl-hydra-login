@@ -93,11 +93,28 @@ async def test_hydra_client_methods_send_expected_requests(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_hydra_client_raises_for_non_success(monkeypatch):
+@pytest.mark.parametrize(
+    ("status_code", "call"),
+    [
+        (404, lambda hydra: hydra.get_login_request("login-123")),
+        (409, lambda hydra: hydra.accept_login("login-123", "subject-1")),
+        (404, lambda hydra: hydra.reject_login("login-123", "denied")),
+        (404, lambda hydra: hydra.get_consent_request("consent-123")),
+        (409, lambda hydra: hydra.accept_consent("consent-123", ["openid"], "subject-1")),
+    ],
+    ids=[
+        "get_login_request_404",
+        "accept_login_409",
+        "reject_login_404",
+        "get_consent_request_404",
+        "accept_consent_409",
+    ],
+)
+async def test_hydra_client_raises_for_non_success(monkeypatch, status_code, call):
     real_async_client = httpx.AsyncClient
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, json={"error": "boom"}, request=request)
+        return httpx.Response(status_code, json={"error": "boom"}, request=request)
 
     monkeypatch.setattr(
         "lnurl_hydra_login.hydra.httpx.AsyncClient",
@@ -110,6 +127,6 @@ async def test_hydra_client_raises_for_non_success(monkeypatch):
     hydra = HydraClient("https://hydra.example.com")
 
     with pytest.raises(httpx.HTTPStatusError):
-        await hydra.get_login_request("login-123")
+        await call(hydra)
 
     await hydra.close()
