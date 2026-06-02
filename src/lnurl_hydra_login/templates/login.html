@@ -175,11 +175,11 @@
 
     <div id="qr-section">
       <div class="qr-wrap">
-        <img id="qr-img" src="" alt="LNURL QR code">
+        <img id="qr-img" src="data:image/png;base64,{{ qr_b64 }}" alt="LNURL QR code">
       </div>
       <div class="lnurl-row">
         <span class="lnurl-text" id="lnurl-display"></span>
-        <button class="copy-btn" id="copy-btn" onclick="copyLnurl()">Copy</button>
+        <button class="copy-btn" id="copy-btn">Copy</button>
       </div>
       <p class="hint">Open your wallet app and scan, or paste the LNURL above.</p>
     </div>
@@ -195,72 +195,19 @@
 
     <div id="error-section">
       <p class="error-text" id="error-msg"></p>
-      <button class="retry-btn" onclick="retry()">Try again</button>
+      <button class="retry-btn" id="retry-btn">Try again</button>
     </div>
   </div>
 
-  <script>
-    const LOGIN_CHALLENGE = {{ login_challenge | tojson }};
+  <script nonce="{{ csp_nonce }}">
+    const LNURL      = {{ lnurl | tojson }};
+    const SESSION_ID = {{ session_id | tojson }};
 
-    let lnurlText = "";
     let eventSource = null;
 
     function show(id) {
       ["loading-section", "qr-section", "waiting", "success-section", "error-section"]
         .forEach(s => document.getElementById(s).style.display = s === id ? "block" : "none");
-    }
-
-    async function init() {
-      show("loading-section");
-
-      let k1, lnurl;
-      try {
-        const resp = await fetch(
-          `/lnurl/generate?login_challenge=${encodeURIComponent(LOGIN_CHALLENGE)}`
-        );
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        ({ k1, lnurl } = await resp.json());
-      } catch (err) {
-        showError("Failed to generate login challenge. Please refresh.");
-        return;
-      }
-
-      lnurlText = lnurl;
-
-      // The browser automatically sends the HttpOnly st_<k1> cookie set by
-      // /lnurl/generate, so the stream_token never appears in the URL.
-      eventSource = new EventSource(`/lnurl/stream/${encodeURIComponent(k1)}`);
-
-      eventSource.addEventListener("connected", () => {
-        document.getElementById("qr-img").src = `/lnurl/qr/${encodeURIComponent(k1)}`;
-        document.getElementById("lnurl-display").textContent = lnurl.toUpperCase();
-        show("qr-section");
-        document.getElementById("waiting").style.display = "block";
-      });
-
-      eventSource.addEventListener("authenticated", (e) => {
-        const { redirect_to } = JSON.parse(e.data);
-        eventSource.close();
-        // Validate redirect_to is a well-formed absolute URL before following it
-        let parsed;
-        try { parsed = new URL(redirect_to); } catch (_) { parsed = null; }
-        if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
-          showError("Received an invalid redirect. Please try again.");
-          return;
-        }
-        show("success-section");
-        window.location.href = redirect_to;
-      });
-
-      eventSource.addEventListener("expired", () => {
-        eventSource.close();
-        showError("Challenge expired. Please try again.");
-      });
-
-      eventSource.onerror = () => {
-        eventSource.close();
-        showError("Connection lost. Please refresh the page.");
-      };
     }
 
     function showError(msg) {
@@ -269,23 +216,61 @@
       show("error-section");
     }
 
-    function retry() {
-      init();
-    }
-
-    function copyLnurl() {
-      navigator.clipboard.writeText(lnurlText.toUpperCase()).then(() => {
+    document.getElementById("copy-btn").addEventListener("click", () => {
+      navigator.clipboard.writeText(LNURL.toUpperCase()).then(() => {
         const btn = document.getElementById("copy-btn");
         btn.textContent = "Copied!";
         btn.classList.add("copied");
-        setTimeout(() => {
-          btn.textContent = "Copy";
-          btn.classList.remove("copied");
-        }, 2000);
+        setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 2000);
       });
-    }
+    });
 
-    init();
+    document.getElementById("retry-btn").addEventListener("click", () => {
+      window.location.reload();
+    });
+
+    // QR is already embedded. Open SSE first; reveal QR only on confirmed
+    // connection so the wallet cannot scan before we are listening.
+    // SESSION_ID is a non-secret routing key; the HttpOnly st_<session_id>
+    // cookie carries the actual secret and is sent automatically.
+    show("loading-section");
+    document.getElementById("lnurl-display").textContent = LNURL.toUpperCase();
+
+    eventSource = new EventSource(`/lnurl/stream?sid=${encodeURIComponent(SESSION_ID)}`);
+
+    eventSource.addEventListener("connected", () => {
+      show("qr-section");
+      document.getElementById("waiting").style.display = "block";
+    });
+
+    eventSource.addEventListener("authenticated", (e) => {
+      const { redirect_to } = JSON.parse(e.data);
+      eventSource.close();
+      let parsed;
+      try { parsed = new URL(redirect_to); } catch (_) { parsed = null; }
+      if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
+        showError("Received an invalid redirect. Please try again.");
+        return;
+      }
+      show("success-section");
+      window.location.href = redirect_to;
+    });
+
+    eventSource.addEventListener("expired", () => {
+      eventSource.close();
+      showError("Challenge expired. Please try again.");
+    });
+
+    // On transient network errors the browser will automatically reconnect
+    // (EventSource spec default). Only give up if the server explicitly sends
+    // an error status (readyState CLOSED = 2), which means auth is no longer
+    // possible for this challenge.
+    eventSource.onerror = () => {
+      if (eventSource.readyState === EventSource.CLOSED) {
+        showError("Connection lost. Please refresh the page.");
+      }
+      // Otherwise readyState is CONNECTING — browser is retrying, do nothing.
+    };
   </script>
 </body>
 </html>

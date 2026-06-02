@@ -1,24 +1,28 @@
 import asyncio
+import base64
 import contextlib
 import hmac
 import json
 import logging
+import os
 import re
 import time
 import urllib.parse
 
-from quart import Quart, Response, jsonify, redirect, render_template, request, send_file
+from quart import Quart, Response, jsonify, make_response, redirect, render_template, request
 
 from .auth import (
-    claim_and_verify_challenge,
+    claim_challenge,
     cleanup_expired_challenges,
+    complete_challenge,
     generate_k1_challenge,
     lnurl_encode,
+    unclaim_challenge,
 )
 from .config import Config
 from .db import Database
 from .hydra import HydraClient
-from .qr_utils import generate_qr_image
+from .qr_utils import generate_qr_b64
 from .sse import RedisSseManager
 
 logger = logging.getLogger(__name__)
@@ -99,7 +103,47 @@ def create_app(config: Config) -> Quart:
                 logger.error("Failed to accept skipped login: %s", e)
                 return jsonify({"error": "Internal error"}), 500
 
-        return await render_template("login.html", login_challenge=login_challenge)
+        try:
+            await cleanup_expired_challenges(db)
+            k1, lnurl_string, stream_token, session_id = await generate_k1_challenge(
+                db, login_challenge, config
+            )
+            callback_url = f"{config.lnurl_callback_url}?tag=login&k1={k1}"
+            qr_b64 = generate_qr_b64(lnurl_encode(callback_url))
+        except Exception as e:
+            logger.error("Failed to generate LNURL challenge: %s", e)
+            return jsonify({"error": "Internal error"}), 500
+
+        csp_nonce = base64.b64encode(os.urandom(16)).decode()
+        response = await render_template(
+            "login.html",
+            lnurl=lnurl_string,
+            qr_b64=qr_b64,
+            session_id=session_id,
+            csp_nonce=csp_nonce,
+        )
+        response = await make_response(response)
+        # Cookie named per-session so multiple tabs don't overwrite each other.
+        # session_id is a non-secret routing key; stream_token inside the cookie
+        # is the actual secret.
+        response.set_cookie(
+            f"st_{session_id}",
+            stream_token,
+            httponly=True,
+            samesite="Strict",
+            secure=config.secure_cookies,
+            max_age=config.auth_challenge_expiry_seconds,
+            path="/lnurl/stream",
+        )
+        response.headers["Cache-Control"] = "no-store, private"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; "
+            f"script-src 'nonce-{csp_nonce}'; "
+            "style-src 'unsafe-inline'; "
+            "img-src data:; "
+            "connect-src 'self'; "
+        )
+        return response
 
     @app.get("/consent")
     async def consent():
@@ -133,59 +177,6 @@ def create_app(config: Config) -> Quart:
     # LNURL-auth endpoints
     # ------------------------------------------------------------------
 
-    @app.get("/lnurl/generate")
-    async def generate_lnurl():
-        """Called by the login page JS to get a fresh k1 + LNURL.
-
-        Sets an HttpOnly SameSite=Strict cookie containing stream_token so it
-        is never visible in URLs or access logs, yet is sent automatically by
-        the browser when opening the SSE stream.
-        """
-        login_challenge = request.args.get("login_challenge")
-        if not login_challenge:
-            return jsonify({"error": "Missing login_challenge"}), 400
-        if not _HYDRA_CHALLENGE_RE.match(login_challenge):
-            return jsonify({"error": "Invalid login_challenge"}), 400
-
-        try:
-            await cleanup_expired_challenges(db)
-            k1, lnurl_string, stream_token = await generate_k1_challenge(db, login_challenge, config)
-            logger.info("Generated challenge k1=%.16s... for login_challenge=%.16s...", k1, login_challenge)
-            # stream_token is not in the JSON body — it's set as an HttpOnly
-            # cookie so it never appears in URLs or access logs.
-            response = jsonify({"k1": k1, "lnurl": lnurl_string})
-            response.set_cookie(
-                f"st_{k1}",
-                stream_token,
-                httponly=True,
-                samesite="Strict",
-                secure=config.secure_cookies,
-                max_age=config.auth_challenge_expiry_seconds,
-                path=f"/lnurl/stream/{k1}",
-            )
-            return response, 200
-        except Exception as e:
-            logger.error("Failed to generate LNURL challenge: %s", e)
-            return jsonify({"error": "Internal error"}), 500
-
-    @app.get("/lnurl/qr/<k1>")
-    async def get_qr_code(k1: str):
-        """Serve the QR code image for a given k1 challenge."""
-        try:
-            row = await db.fetchrow(
-                "SELECT expires_at FROM auth_challenges WHERE k1 = $1", k1
-            )
-            if not row or int(time.time()) > row["expires_at"]:
-                return jsonify({"error": "Invalid or expired challenge"}), 404
-
-            callback_url = f"{config.lnurl_callback_url}?tag=login&k1={k1}"
-            lnurl_string = lnurl_encode(callback_url)
-            img_io = await generate_qr_image(lnurl_string)
-            return await send_file(img_io, mimetype="image/png")
-        except Exception as e:
-            logger.error("QR generation error: %s", e)
-            return jsonify({"error": "Internal error"}), 500
-
     @app.get("/lnurl/callback")
     async def lnurl_callback():
         """Called by Lightning wallets after scanning the QR code."""
@@ -197,58 +188,89 @@ def create_app(config: Config) -> Quart:
         if tag != "login" or not all([k1, sig, key]):
             return jsonify({"status": "ERROR", "reason": "Invalid parameters"}), 400
 
-        # Validate, verify the signature, and mark used inside one transaction
-        # while the row lock is held. A bogus sig causes a rollback, leaving
-        # used=0 so the real wallet can still authenticate.
-        row = await claim_and_verify_challenge(db, k1, sig, key)
+        # Step 1 — atomic claim (pending → claimed).
+        # Verifies sig inside the transaction while holding the row lock.
+        # A bad sig or any failure rolls back; k1 stays pending so the wallet
+        # can retry without a new QR scan.
+        row = await claim_challenge(db, k1, sig, key)
         if row is None:
             return jsonify({"status": "ERROR", "reason": "Invalid or expired challenge"}), 400
 
+        # Step 2 — Hydra accept (outside the transaction).
+        # On failure we unclaim (claimed → pending) so the wallet can retry.
         try:
             redirect_to = await hydra.accept_login(row["login_challenge"], subject=key)
         except Exception as e:
-            logger.error("Failed to accept Hydra login: %s", e)
+            logger.error("Failed to accept Hydra login for k1=%.16s...: %s", k1, e)
+            await unclaim_challenge(db, k1)
             return jsonify({"status": "ERROR", "reason": "Internal error"}), 500
 
         if not _validate_redirect_to(redirect_to, config.hydra_public_url):
             logger.error("Hydra returned suspicious redirect_to: %.80s", redirect_to)
+            await unclaim_challenge(db, k1)
             return jsonify({"status": "ERROR", "reason": "Internal error"}), 500
 
-        await sse.publish_auth(k1, redirect_to)
+        # Step 3 — complete (claimed → completed), persisting redirect_to.
+        # From this point the result is durable; Redis is best-effort only.
+        completed = await complete_challenge(db, k1, pubkey=key, redirect_to=redirect_to)
+        if not completed:
+            logger.error("complete_challenge returned False for k1=%.16s... — unexpected state", k1)
+            return jsonify({"status": "ERROR", "reason": "Internal error"}), 500
+
+        # Step 4 — best-effort Redis publish for low-latency SSE delivery.
+        # The SSE loop polls the DB periodically so Redis failure is not fatal.
+        try:
+            await sse.publish_auth(k1, redirect_to)
+        except Exception as exc:
+            logger.warning("Redis publish failed for k1=%.16s... (SSE will poll DB): %s", k1, exc)
+
         logger.info("Auth complete for pubkey=%.16s...", key)
         return jsonify({"status": "OK"}), 200
 
-    @app.get("/lnurl/stream/<k1>")
-    async def stream_auth_status(k1: str):
+    @app.get("/lnurl/stream")
+    async def stream_auth_status():
         """SSE stream the browser subscribes to while showing the QR code.
 
-        stream_token is read from an HttpOnly cookie (set by /lnurl/generate)
-        so it never appears in URLs or access logs. Only the originating browser
-        session can open this stream.
+        Identified by st_<session_id> HttpOnly cookie. session_id is a
+        non-secret routing key present in the page JS; stream_token inside
+        the cookie is the secret. Per-session cookies prevent tab collisions.
+
+        Delivery order: check DB first (handles Redis-failed callbacks and
+        reconnects), then subscribe to Redis, then re-check DB once after
+        subscribing to close the race between those two steps.
         """
-        stream_token = request.cookies.get(f"st_{k1}")
+        session_id = request.args.get("sid")
+        if not session_id:
+            return jsonify({"error": "Missing session id"}), 401
+
+        stream_token = request.cookies.get(f"st_{session_id}")
         if not stream_token:
             return jsonify({"error": "Missing stream token"}), 401
 
         row = await db.fetchrow(
-            "SELECT expires_at, stream_token FROM auth_challenges WHERE k1 = $1", k1
+            "SELECT k1, expires_at, stream_token, redirect_to "
+            "FROM auth_challenges WHERE session_id = $1",
+            session_id,
         )
         if not row:
-            return jsonify({"error": "Invalid challenge"}), 404
+            return jsonify({"error": "Invalid session"}), 401
         if int(time.time()) > row["expires_at"]:
             return jsonify({"error": "Challenge expired"}), 410
         if not hmac.compare_digest(row["stream_token"] or "", stream_token):
             return jsonify({"error": "Invalid stream token"}), 401
 
-        async def event_stream():
-            # 2 KiB padding forces Cloudflare to flush its response buffer
-            # before the first real event arrives at the browser.
-            yield ": " + "x" * 2048 + "\n\n"
-            yield _sse_event("connected", {"k1": k1})
+        k1 = row["k1"]
 
-            # Run the Redis listener in a background task so we can send
-            # periodic heartbeat comments to keep Cloudflare from RST-ing
-            # the HTTP/2 stream while the user is scanning the QR code.
+        async def event_stream():
+            yield ": " + "x" * 2048 + "\n\n"
+            yield _sse_event("connected", {})
+
+            # Fast path: callback already completed before SSE connected
+            # (also covers Redis-failed callbacks — result is in the DB).
+            if row["redirect_to"]:
+                yield _sse_event("authenticated", {"redirect_to": row["redirect_to"]})
+                return
+
             queue: asyncio.Queue = asyncio.Queue()
 
             async def _feed():
@@ -264,17 +286,44 @@ def create_app(config: Config) -> Quart:
 
             task = asyncio.create_task(_feed())
             try:
+                # Re-check DB immediately after subscribing to close the race
+                # between "DB had no result yet" and "callback wrote + published".
+                recheck = await db.fetchrow(
+                    "SELECT redirect_to FROM auth_challenges WHERE k1 = $1", k1
+                )
+                if recheck and recheck["redirect_to"]:
+                    yield _sse_event("authenticated", {"redirect_to": recheck["redirect_to"]})
+                    return
+
                 while True:
                     try:
                         kind, value = await asyncio.wait_for(queue.get(), timeout=20)
                     except asyncio.TimeoutError:
+                        # Heartbeat interval — also poll DB so Redis failure
+                        # doesn't leave an already-completed auth invisible.
+                        poll = await db.fetchrow(
+                            "SELECT redirect_to FROM auth_challenges WHERE k1 = $1", k1
+                        )
+                        if poll and poll["redirect_to"]:
+                            yield _sse_event("authenticated", {"redirect_to": poll["redirect_to"]})
+                            return
                         yield ": heartbeat\n\n"
                         continue
                     if kind == "auth":
                         yield _sse_event("authenticated", {"redirect_to": value})
                         return
                     else:
-                        yield _sse_event("expired", {"error": "Challenge expired"})
+                        # Redis listener timed out or closed. Do a final DB
+                        # check before declaring expired — covers the race
+                        # where complete_challenge() wrote redirect_to just
+                        # before the Redis timeout fired.
+                        final = await db.fetchrow(
+                            "SELECT redirect_to FROM auth_challenges WHERE k1 = $1", k1
+                        )
+                        if final and final["redirect_to"]:
+                            yield _sse_event("authenticated", {"redirect_to": final["redirect_to"]})
+                        else:
+                            yield _sse_event("expired", {"error": "Challenge expired"})
                         return
             finally:
                 task.cancel()

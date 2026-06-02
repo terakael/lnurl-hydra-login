@@ -41,15 +41,44 @@ class Database:
                 login_challenge TEXT NOT NULL,
                 created_at BIGINT NOT NULL,
                 expires_at BIGINT NOT NULL,
-                used INTEGER DEFAULT 0 CHECK(used IN (0, 1)),
-                stream_token TEXT
+                used INTEGER DEFAULT 0 CHECK(used IN (0, 1, 2)),
+                stream_token TEXT,
+                session_id TEXT,
+                redirect_to TEXT,
+                authenticated_at BIGINT,
+                pubkey TEXT
             )
         """)
-        # Add stream_token to existing deployments that predate this column
+        # Widen the used constraint from (0,1) to (0,1,2) for the tri-state
+        # machine. Postgres requires drop + add to change a check constraint.
         await self.execute("""
-            ALTER TABLE auth_challenges ADD COLUMN IF NOT EXISTS stream_token TEXT
+            ALTER TABLE auth_challenges
+            DROP CONSTRAINT IF EXISTS auth_challenges_used_check
         """)
+        await self.execute("""
+            ALTER TABLE auth_challenges
+            ADD CONSTRAINT auth_challenges_used_check
+            CHECK (used IN (0, 1, 2))
+        """)
+        for col, typedef in [
+            ("stream_token",    "TEXT"),
+            ("session_id",      "TEXT"),
+            ("redirect_to",     "TEXT"),
+            ("authenticated_at","BIGINT"),
+            ("pubkey",          "TEXT"),
+        ]:
+            await self.execute(
+                f"ALTER TABLE auth_challenges ADD COLUMN IF NOT EXISTS {col} {typedef}"
+            )
         await self.execute("""
             CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires_at
             ON auth_challenges (expires_at)
+        """)
+        await self.execute("""
+            CREATE INDEX IF NOT EXISTS idx_auth_challenges_stream_token
+            ON auth_challenges (stream_token)
+        """)
+        await self.execute("""
+            CREATE INDEX IF NOT EXISTS idx_auth_challenges_session_id
+            ON auth_challenges (session_id)
         """)

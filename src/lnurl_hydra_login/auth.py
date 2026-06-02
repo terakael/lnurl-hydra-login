@@ -14,32 +14,39 @@ def lnurl_encode(url: str) -> str:
     return lnurl_encode_lib(url).bech32.lower()
 
 
-async def generate_k1_challenge(db, login_challenge: str, config) -> tuple[str, str, str]:
+async def generate_k1_challenge(db, login_challenge: str, config) -> tuple[str, str, str, str]:
     """Generate a k1 challenge, store it linked to the Hydra login_challenge.
 
-    Returns (k1_hex, lnurl_string, stream_token). The stream_token is a separate
-    secret that must be presented to open the SSE stream, so an observer who sees
-    k1 in a URL or log cannot subscribe to the auth result.
+    Returns (k1_hex, lnurl_string, stream_token, session_id).
+
+    stream_token: secret delivered as an HttpOnly cookie; authorises opening
+    the SSE stream for this challenge.
+
+    session_id: non-secret routing key embedded in the page JS; used only to
+    name the right st_<session_id> cookie so multiple tabs don't collide.
     """
     k1_hex = secrets.token_bytes(32).hex()
     stream_token = secrets.token_urlsafe(32)
+    session_id = secrets.token_urlsafe(16)
     created_at = int(time.time())
     expires_at = created_at + config.auth_challenge_expiry_seconds
 
     await db.execute(
         """
-        INSERT INTO auth_challenges (k1, login_challenge, created_at, expires_at, stream_token)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO auth_challenges
+            (k1, login_challenge, created_at, expires_at, stream_token, session_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
         """,
         k1_hex,
         login_challenge,
         created_at,
         expires_at,
         stream_token,
+        session_id,
     )
 
     callback_url = f"{config.lnurl_callback_url}?tag=login&k1={k1_hex}"
-    return k1_hex, lnurl_encode(callback_url), stream_token
+    return k1_hex, lnurl_encode(callback_url), stream_token, session_id
 
 
 async def verify_lnurl_signature(k1: str, sig: str, key: str) -> bool:
@@ -58,16 +65,20 @@ async def cleanup_expired_challenges(db) -> int:
     return int(result.split()[-1]) if result else 0
 
 
-async def claim_and_verify_challenge(db, k1: str, sig: str, key: str) -> dict | None:
-    """Validate, verify the signature, and atomically claim a challenge.
+_STATE_PENDING   = 0
+_STATE_CLAIMED   = 1
+_STATE_COMPLETED = 2
 
-    All three steps happen inside a single transaction while the row lock is
-    held: validate → verify signature → mark used. The UPDATE only commits if
-    the signature is valid, so a bogus callback cannot burn a k1 before the
-    real wallet uses it.
 
-    Returns the row dict on success, or None if the challenge is invalid,
-    expired, already used, or the signature fails verification.
+async def claim_challenge(db, k1: str, sig: str, key: str) -> dict | None:
+    """Atomically move a challenge from pending → claimed.
+
+    Locks the row, validates it is pending and unexpired, verifies the
+    secp256k1 signature — all inside one transaction. Sets used=1 (claimed)
+    on success. A bad signature or any failure rolls back, leaving the
+    challenge pending so the wallet can retry.
+
+    Returns the row dict on success, None on any failure.
     """
     async with db.transaction() as conn:
         row = await conn.fetchrow(
@@ -77,16 +88,52 @@ async def claim_and_verify_challenge(db, k1: str, sig: str, key: str) -> dict | 
         )
         if not row:
             return None
-        if row["used"]:
+        if row["used"] != _STATE_PENDING:
             return None
         if int(time.time()) > row["expires_at"]:
             return None
-        # Verify inside the transaction so a bad sig causes a rollback,
-        # leaving used=0 and allowing the real wallet to proceed.
         if not await verify_lnurl_signature(k1, sig, key):
             return None
         await conn.execute(
-            "UPDATE auth_challenges SET used = 1 WHERE k1 = $1",
-            k1,
+            "UPDATE auth_challenges SET used = $2 WHERE k1 = $1",
+            k1, _STATE_CLAIMED,
         )
         return dict(row)
+
+
+async def unclaim_challenge(db, k1: str) -> None:
+    """Move a challenge from claimed → pending after a Hydra failure.
+
+    Allows the wallet to retry without requiring a new QR scan.
+    """
+    await db.execute(
+        "UPDATE auth_challenges SET used = $2 WHERE k1 = $1 AND used = $3",
+        k1, _STATE_PENDING, _STATE_CLAIMED,
+    )
+
+
+async def complete_challenge(db, k1: str, pubkey: str, redirect_to: str) -> bool:
+    """Move a challenge from claimed → completed and persist the auth result.
+
+    Called only after Hydra has successfully accepted the login. Returns
+    False if the row was not in the claimed state (should not happen in
+    normal flow; indicates a bug if it does).
+    """
+    result = await db.execute(
+        """
+        UPDATE auth_challenges
+           SET used             = $2,
+               pubkey           = $3,
+               redirect_to      = $4,
+               authenticated_at = $5
+         WHERE k1   = $1
+           AND used = $6
+        """,
+        k1,
+        _STATE_COMPLETED,
+        pubkey,
+        redirect_to,
+        int(time.time()),
+        _STATE_CLAIMED,
+    )
+    return int(result.split()[-1]) > 0 if result else False
