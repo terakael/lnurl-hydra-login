@@ -54,12 +54,19 @@ def _validate_redirect_to(redirect_to: str, hydra_public_url: str) -> bool:
     return parsed.scheme == expected.scheme and parsed.netloc == expected.netloc
 
 
-def create_app(config: Config) -> Quart:
+def create_app(
+    config: Config,
+    *,
+    db: Database | None = None,
+    hydra: HydraClient | None = None,
+    sse: RedisSseManager | None = None,
+) -> Quart:
     app = Quart(__name__)
 
-    db = Database(config.database_url)
-    hydra = HydraClient(config.hydra_admin_url)
-    sse = RedisSseManager(config.redis_url)
+    db = db or Database(config.database_url)
+    hydra = hydra or HydraClient(config.hydra_admin_url)
+    sse = sse or RedisSseManager(config.redis_url)
+    app.extensions["lnurl_hydra_login"] = {"db": db, "hydra": hydra, "sse": sse}
 
     @app.before_serving
     async def startup():
