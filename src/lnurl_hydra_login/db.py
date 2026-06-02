@@ -66,6 +66,8 @@ class Database:
             ("redirect_to",     "TEXT"),
             ("authenticated_at","BIGINT"),
             ("pubkey",          "TEXT"),
+            ("claim_token",     "TEXT"),
+            ("claim_expires_at","BIGINT"),
         ]:
             await self.execute(
                 f"ALTER TABLE auth_challenges ADD COLUMN IF NOT EXISTS {col} {typedef}"

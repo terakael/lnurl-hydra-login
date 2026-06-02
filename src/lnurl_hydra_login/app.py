@@ -17,6 +17,7 @@ from .auth import (
     complete_challenge,
     generate_k1_challenge,
     lnurl_encode,
+    recover_stale_claims,
     unclaim_challenge,
 )
 from .config import Config
@@ -64,6 +65,7 @@ def create_app(config: Config) -> Quart:
     async def startup():
         await db.connect()
         await db.migrate()
+        await recover_stale_claims(db)
         logger.info("Database connected and migrated")
 
     @app.after_serving
@@ -191,28 +193,32 @@ def create_app(config: Config) -> Quart:
         # Step 1 — atomic claim (pending → claimed).
         # Verifies sig inside the transaction while holding the row lock.
         # A bad sig or any failure rolls back; k1 stays pending so the wallet
-        # can retry without a new QR scan.
+        # can retry without a new QR scan. Returns claim_token for fencing.
         row = await claim_challenge(db, k1, sig, key)
         if row is None:
             return jsonify({"status": "ERROR", "reason": "Invalid or expired challenge"}), 400
 
+        claim_token = row["claim_token"]
+
         # Step 2 — Hydra accept (outside the transaction).
         # On failure we unclaim (claimed → pending) so the wallet can retry.
+        # claim_token ensures a stale unclaim from a slow/crashed pod is
+        # discarded if the lease was already recovered and re-claimed.
         try:
             redirect_to = await hydra.accept_login(row["login_challenge"], subject=key)
         except Exception as e:
             logger.error("Failed to accept Hydra login for k1=%.16s...: %s", k1, e)
-            await unclaim_challenge(db, k1)
+            await unclaim_challenge(db, k1, claim_token)
             return jsonify({"status": "ERROR", "reason": "Internal error"}), 500
 
         if not _validate_redirect_to(redirect_to, config.hydra_public_url):
             logger.error("Hydra returned suspicious redirect_to: %.80s", redirect_to)
-            await unclaim_challenge(db, k1)
+            await unclaim_challenge(db, k1, claim_token)
             return jsonify({"status": "ERROR", "reason": "Internal error"}), 500
 
         # Step 3 — complete (claimed → completed), persisting redirect_to.
         # From this point the result is durable; Redis is best-effort only.
-        completed = await complete_challenge(db, k1, pubkey=key, redirect_to=redirect_to)
+        completed = await complete_challenge(db, k1, pubkey=key, redirect_to=redirect_to, claim_token=claim_token)
         if not completed:
             logger.error("complete_challenge returned False for k1=%.16s... — unexpected state", k1)
             return jsonify({"status": "ERROR", "reason": "Internal error"}), 500

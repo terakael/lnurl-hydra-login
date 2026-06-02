@@ -236,9 +236,14 @@
     show("loading-section");
     document.getElementById("lnurl-display").textContent = LNURL.toUpperCase();
 
+    let connected = false;
+    let setupErrors = 0;
+
     eventSource = new EventSource(`/lnurl/stream?sid=${encodeURIComponent(SESSION_ID)}`);
 
     eventSource.addEventListener("connected", () => {
+      connected = true;
+      setupErrors = 0;
       show("qr-section");
       document.getElementById("waiting").style.display = "block";
     });
@@ -261,15 +266,24 @@
       showError("Challenge expired. Please try again.");
     });
 
-    // On transient network errors the browser will automatically reconnect
-    // (EventSource spec default). Only give up if the server explicitly sends
-    // an error status (readyState CLOSED = 2), which means auth is no longer
-    // possible for this challenge.
     eventSource.onerror = () => {
       if (eventSource.readyState === EventSource.CLOSED) {
         showError("Connection lost. Please refresh the page.");
+        return;
       }
-      // Otherwise readyState is CONNECTING — browser is retrying, do nothing.
+      // Pre-connection errors (401, 410, etc.) indicate a permanent setup
+      // failure rather than a transient drop. Allow one retry in case of a
+      // momentary glitch, but give up on the second consecutive error so the
+      // user is not left stuck on the loading screen indefinitely.
+      if (!connected) {
+        setupErrors++;
+        if (setupErrors >= 2) {
+          eventSource.close();
+          showError("Failed to start session. Please refresh the page.");
+        }
+      }
+      // Post-connection errors: browser auto-reconnects per EventSource spec;
+      // the server will re-check DB state on reconnect so auth is not lost.
     };
   </script>
 </body>

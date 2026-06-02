@@ -57,6 +57,30 @@ async def verify_lnurl_signature(k1: str, sig: str, key: str) -> bool:
         return False
 
 
+_CLAIM_LEASE_SECONDS = 30
+
+
+async def recover_stale_claims(db) -> int:
+    """Reset claimed rows whose lease has expired back to pending.
+
+    Safe to call from any replica at any time including startup. Only touches
+    rows where claim_expires_at < now, so an active claim on another pod is
+    never disturbed. claim_token + claim_expires_at act as a fencing token:
+    if a row is recovered and re-claimed before the original pod's
+    unclaim/complete runs, the WHERE clause on those calls matches zero rows
+    and the stale write is silently discarded.
+    """
+    result = await db.execute(
+        "UPDATE auth_challenges SET used = $1, claim_token = NULL, claim_expires_at = NULL "
+        "WHERE used = $2 AND claim_expires_at < $3",
+        _STATE_PENDING, _STATE_CLAIMED, int(time.time()),
+    )
+    count = int(result.split()[-1]) if result else 0
+    if count:
+        logger.warning("Recovered %d stale claimed challenge(s)", count)
+    return count
+
+
 async def cleanup_expired_challenges(db) -> int:
     result = await db.execute(
         "DELETE FROM auth_challenges WHERE expires_at < $1",
@@ -74,50 +98,70 @@ async def claim_challenge(db, k1: str, sig: str, key: str) -> dict | None:
     """Atomically move a challenge from pending → claimed.
 
     Locks the row, validates it is pending and unexpired, verifies the
-    secp256k1 signature — all inside one transaction. Sets used=1 (claimed)
-    on success. A bad signature or any failure rolls back, leaving the
-    challenge pending so the wallet can retry.
+    secp256k1 signature — all inside one transaction. Writes a claim_token
+    (random fencing token) and claim_expires_at (lease TTL) so that
+    recover_stale_claims() on any replica can only reset genuinely abandoned
+    claims, and so that a slow pod's unclaim/complete is fenced out if the
+    lease has already been recovered and re-claimed by another request.
 
-    Returns the row dict on success, None on any failure.
+    Returns the row dict (including claim_token) on success, None on any failure.
     """
+    now = int(time.time())
+    claim_token = secrets.token_hex(16)
+    claim_expires_at = now + _CLAIM_LEASE_SECONDS
     async with db.transaction() as conn:
         row = await conn.fetchrow(
-            "SELECT k1, used, expires_at, login_challenge "
+            "SELECT k1, used, expires_at, login_challenge, claim_expires_at "
             "FROM auth_challenges WHERE k1 = $1 FOR UPDATE",
             k1,
         )
         if not row:
             return None
-        if row["used"] != _STATE_PENDING:
+        if now > row["expires_at"]:
             return None
-        if int(time.time()) > row["expires_at"]:
-            return None
+
+        if row["used"] == _STATE_CLAIMED:
+            # Another pod claimed this row but its lease has expired — the pod
+            # that held the claim is gone. Recover inline under the row lock so
+            # retries on any healthy replica succeed without waiting for startup.
+            if row["claim_expires_at"] is None or now <= row["claim_expires_at"]:
+                return None  # lease still valid; another pod is actively processing
+            logger.warning("Recovering expired claim for k1=%.16s... inline", k1)
+            # Fall through: write new claim below
+        elif row["used"] != _STATE_PENDING:
+            return None  # completed or unknown state
+
         if not await verify_lnurl_signature(k1, sig, key):
             return None
         await conn.execute(
-            "UPDATE auth_challenges SET used = $2 WHERE k1 = $1",
-            k1, _STATE_CLAIMED,
+            "UPDATE auth_challenges "
+            "SET used = $2, claim_token = $3, claim_expires_at = $4 WHERE k1 = $1",
+            k1, _STATE_CLAIMED, claim_token, claim_expires_at,
         )
-        return dict(row)
+        return {**dict(row), "claim_token": claim_token}
 
 
-async def unclaim_challenge(db, k1: str) -> None:
+async def unclaim_challenge(db, k1: str, claim_token: str) -> None:
     """Move a challenge from claimed → pending after a Hydra failure.
 
-    Allows the wallet to retry without requiring a new QR scan.
+    claim_token gates the write: if the lease was already recovered and
+    re-claimed by another request, the WHERE clause matches zero rows and
+    this stale unclaim is silently discarded.
     """
     await db.execute(
-        "UPDATE auth_challenges SET used = $2 WHERE k1 = $1 AND used = $3",
-        k1, _STATE_PENDING, _STATE_CLAIMED,
+        "UPDATE auth_challenges "
+        "SET used = $2, claim_token = NULL, claim_expires_at = NULL "
+        "WHERE k1 = $1 AND used = $3 AND claim_token = $4",
+        k1, _STATE_PENDING, _STATE_CLAIMED, claim_token,
     )
 
 
-async def complete_challenge(db, k1: str, pubkey: str, redirect_to: str) -> bool:
+async def complete_challenge(db, k1: str, pubkey: str, redirect_to: str, claim_token: str) -> bool:
     """Move a challenge from claimed → completed and persist the auth result.
 
-    Called only after Hydra has successfully accepted the login. Returns
-    False if the row was not in the claimed state (should not happen in
-    normal flow; indicates a bug if it does).
+    claim_token gates the write: if the lease was already recovered and
+    re-claimed by another request, the WHERE clause matches zero rows and
+    this stale complete is silently discarded (returns False).
     """
     result = await db.execute(
         """
@@ -125,9 +169,12 @@ async def complete_challenge(db, k1: str, pubkey: str, redirect_to: str) -> bool
            SET used             = $2,
                pubkey           = $3,
                redirect_to      = $4,
-               authenticated_at = $5
-         WHERE k1   = $1
-           AND used = $6
+               authenticated_at = $5,
+               claim_token      = NULL,
+               claim_expires_at = NULL
+         WHERE k1          = $1
+           AND used         = $6
+           AND claim_token  = $7
         """,
         k1,
         _STATE_COMPLETED,
@@ -135,5 +182,6 @@ async def complete_challenge(db, k1: str, pubkey: str, redirect_to: str) -> bool
         redirect_to,
         int(time.time()),
         _STATE_CLAIMED,
+        claim_token,
     )
     return int(result.split()[-1]) > 0 if result else False
