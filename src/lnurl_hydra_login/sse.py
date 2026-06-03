@@ -13,9 +13,9 @@ _RESULT_TTL = 60  # seconds to hold result for late SSE subscribers
 
 
 class RedisSseManager:
-    def __init__(self, redis_url: str):
+    def __init__(self, redis_url: str, socket_timeout: float = 300.0):
         self._redis: aioredis.Redis = aioredis.from_url(
-            redis_url, decode_responses=True
+            redis_url, decode_responses=True, socket_timeout=socket_timeout
         )
 
     async def publish_auth(self, k1: str, redirect_to: str) -> None:
@@ -53,9 +53,7 @@ class RedisSseManager:
                 async for message in pubsub.listen():
                     if message["type"] == "message":
                         data = json.loads(message["data"])
-                        logger.info(
-                            "Auth notification received for k1=%.16s...", k1
-                        )
+                        logger.info("Auth notification received for k1=%.16s...", k1)
                         yield data["redirect_to"]
                         return
         except TimeoutError:

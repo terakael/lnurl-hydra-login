@@ -9,7 +9,15 @@ import re
 import time
 import urllib.parse
 
-from quart import Quart, Response, jsonify, make_response, redirect, render_template, request
+from quart import (
+    Quart,
+    Response,
+    jsonify,
+    make_response,
+    redirect,
+    render_template,
+    request,
+)
 
 from .auth import (
     claim_challenge,
@@ -36,7 +44,7 @@ def _sse_event(event: str, data: dict) -> str:
 # Hydra challenge tokens are opaque strings. Hydra's current and legacy
 # encodings can exceed 1 KiB, so accept a broad URL-safe character set with a
 # generous cap rather than assuming a compact format.
-_HYDRA_CHALLENGE_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,4096}$")
+_HYDRA_CHALLENGE_RE = re.compile(r"^[a-zA-Z0-9_\-=]{1,4096}$")
 
 
 def _validate_redirect_to(redirect_to: str, hydra_public_url: str) -> bool:
@@ -65,7 +73,9 @@ def create_app(
 
     db = db or Database(config.database_url)
     hydra = hydra or HydraClient(config.hydra_admin_url)
-    sse = sse or RedisSseManager(config.redis_url)
+    sse = sse or RedisSseManager(
+        config.redis_url, socket_timeout=float(config.auth_challenge_expiry_seconds)
+    )
     app.extensions["lnurl_hydra_login"] = {"db": db, "hydra": hydra, "sse": sse}
 
     @app.before_serving
@@ -105,7 +115,10 @@ def create_app(
             try:
                 redirect_to = await hydra.accept_login(login_challenge, subject)
                 if not _validate_redirect_to(redirect_to, config.hydra_public_url):
-                    logger.error("Hydra returned suspicious redirect_to on skip-login: %.80s", redirect_to)
+                    logger.error(
+                        "Hydra returned suspicious redirect_to on skip-login: %.80s",
+                        redirect_to,
+                    )
                     return jsonify({"error": "Internal error"}), 500
                 return redirect(redirect_to)
             except Exception as e:
@@ -168,14 +181,19 @@ def create_app(
             requested = set(consent_req.get("requested_scope", []))
             disallowed = requested - config.consent_allowed_scopes
             if disallowed:
-                logger.warning("Consent request contained disallowed scopes: %s", disallowed)
+                logger.warning(
+                    "Consent request contained disallowed scopes: %s", disallowed
+                )
                 return jsonify({"error": "Requested scopes are not permitted"}), 403
             subject = consent_req.get("subject", "")
             redirect_to = await hydra.accept_consent(
                 consent_challenge, list(requested), subject
             )
             if not _validate_redirect_to(redirect_to, config.hydra_public_url):
-                logger.error("Hydra returned suspicious redirect_to on consent: %.80s", redirect_to)
+                logger.error(
+                    "Hydra returned suspicious redirect_to on consent: %.80s",
+                    redirect_to,
+                )
                 return jsonify({"error": "Internal error"}), 500
             return redirect(redirect_to)
         except Exception as e:
@@ -203,7 +221,9 @@ def create_app(
         # can retry without a new QR scan. Returns claim_token for fencing.
         row = await claim_challenge(db, k1, sig, key)
         if row is None:
-            return jsonify({"status": "ERROR", "reason": "Invalid or expired challenge"}), 400
+            return jsonify(
+                {"status": "ERROR", "reason": "Invalid or expired challenge"}
+            ), 400
 
         claim_token = row["claim_token"]
 
@@ -234,9 +254,14 @@ def create_app(
         # is safe. The retry loop will either find the row already completed (if
         # the other replica succeeded) or re-claim and complete it after that
         # replica's lease expires.
-        completed = await complete_challenge(db, k1, pubkey=key, redirect_to=redirect_to, claim_token=claim_token)
+        completed = await complete_challenge(
+            db, k1, pubkey=key, redirect_to=redirect_to, claim_token=claim_token
+        )
         if not completed:
-            logger.warning("complete_challenge missed claim for k1=%.16s... — lease expired mid-flight", k1)
+            logger.warning(
+                "complete_challenge missed claim for k1=%.16s... — lease expired mid-flight",
+                k1,
+            )
             return jsonify({"status": "ERROR", "reason": "Internal error"}), 500
 
         # Step 4 — best-effort Redis publish for low-latency SSE delivery.
@@ -244,7 +269,9 @@ def create_app(
         try:
             await sse.publish_auth(k1, redirect_to)
         except Exception as exc:
-            logger.warning("Redis publish failed for k1=%.16s... (SSE will poll DB): %s", k1, exc)
+            logger.warning(
+                "Redis publish failed for k1=%.16s... (SSE will poll DB): %s", k1, exc
+            )
 
         logger.info("Auth complete for pubkey=%.16s...", key)
         return jsonify({"status": "OK"}), 200
@@ -314,7 +341,9 @@ def create_app(
                     "SELECT redirect_to FROM auth_challenges WHERE k1 = $1", k1
                 )
                 if recheck and recheck["redirect_to"]:
-                    yield _sse_event("authenticated", {"redirect_to": recheck["redirect_to"]})
+                    yield _sse_event(
+                        "authenticated", {"redirect_to": recheck["redirect_to"]}
+                    )
                     return
 
                 while True:
@@ -327,7 +356,9 @@ def create_app(
                             "SELECT redirect_to FROM auth_challenges WHERE k1 = $1", k1
                         )
                         if poll and poll["redirect_to"]:
-                            yield _sse_event("authenticated", {"redirect_to": poll["redirect_to"]})
+                            yield _sse_event(
+                                "authenticated", {"redirect_to": poll["redirect_to"]}
+                            )
                             return
                         yield ": heartbeat\n\n"
                         continue
@@ -343,7 +374,9 @@ def create_app(
                             "SELECT redirect_to FROM auth_challenges WHERE k1 = $1", k1
                         )
                         if final and final["redirect_to"]:
-                            yield _sse_event("authenticated", {"redirect_to": final["redirect_to"]})
+                            yield _sse_event(
+                                "authenticated", {"redirect_to": final["redirect_to"]}
+                            )
                         else:
                             yield _sse_event("expired", {"error": "Challenge expired"})
                         return
